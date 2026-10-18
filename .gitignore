@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+*.log
+*.log.*
+prices*.csv
+data/*
+!data/README.md
+reports/*
+!reports/README.md

@@ -1,0 +1,43 @@
+name: Analyze CSV manually
+on:
+  workflow_dispatch:
+    inputs:
+      csv_text:
+        description: 'Paste public/non-sensitive prices CSV including its header (outputs are not private)'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test offline analyzer
+        run: python -m unittest discover -s tests -v
+      - name: Write supplied CSV safely
+        env:
+          CSV_TEXT: ${{ inputs.csv_text }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          Path('data').mkdir(exist_ok=True)
+          Path('data/input.csv').write_text(os.environ['CSV_TEXT'], encoding='utf-8')
+          PY
+      - name: Analyze without network calls
+        run: python tools/analyze_prices.py data/input.csv --output reports/analysis.json
+      - name: Preserve generated report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-quality-report
+          path: reports/analysis.json
+          if-no-files-found: warn
+          retention-days: 7
