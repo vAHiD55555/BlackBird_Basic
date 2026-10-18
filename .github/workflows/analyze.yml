@@ -1,43 +1,110 @@
 name: Analyze CSV manually
+run-name: Manual data check by @${{ github.actor }}
+
 on:
   workflow_dispatch:
     inputs:
       csv_text:
-        description: 'Paste public/non-sensitive prices CSV including its header (outputs are not private)'
-        required: true
+        description: 'Optional public CSV with header. Leave empty for ONE live BTC-USD sample (connection test only).'
+        required: false
+        default: ''
         type: string
+
 permissions:
   contents: read
+
 jobs:
   analyze:
+    name: Test and analyze (read-only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout project
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Test offline analyzer
-        run: python -m unittest discover -s tests -v
-      - name: Write supplied CSV safely
+
+      - name: Prepare report directory
+        run: mkdir -p reports data
+
+      - name: Run offline tests
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee reports/tests.txt
+
+      - name: Prepare user CSV or choose connection test
+        id: input
         env:
           CSV_TEXT: ${{ inputs.csv_text }}
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
-          Path('data').mkdir(exist_ok=True)
-          Path('data/input.csv').write_text(os.environ['CSV_TEXT'], encoding='utf-8')
+          text = os.environ.get('CSV_TEXT', '')
+          mode = 'csv' if text.strip() else 'live-smoke-test'
+          if mode == 'csv':
+              # Accept real newlines or literal backslash-n for mobile forms.
+              text = text.replace('\\r\\n', '\n').replace('\\n', '\n')
+              text = text.replace('\r\n', '\n').strip() + '\n'
+              Path('data/input.csv').write_text(text, encoding='utf-8')
+          Path('reports/mode.txt').write_text(mode + '\n', encoding='utf-8')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('mode=' + mode + '\n')
+          print('Selected mode:', mode)
           PY
-      - name: Analyze without network calls
-        run: python tools/analyze_prices.py data/input.csv --output reports/analysis.json
-      - name: Preserve generated report
+
+      - name: Get ONE live observation using project collector
+        if: steps.input.outputs.mode == 'live-smoke-test'
+        run: |
+          set -o pipefail
+          python main.py --once --output data/input.csv 2>&1 | tee reports/connection.txt
+
+      - name: Analyze CSV offline
+        run: |
+          set -o pipefail
+          python tools/analyze_prices.py data/input.csv --output reports/analysis.json 2>&1 | tee reports/analysis.txt
+
+      - name: Write run summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          mode_path = Path('reports/mode.txt')
+          mode = mode_path.read_text().strip() if mode_path.exists() else 'not reached'
+          lines = ['## BlackBird Basic — manual check', '', 'Mode: ' + mode, '']
+          path = Path('reports/analysis.json')
+          if path.exists():
+              report = json.loads(path.read_text(encoding='utf-8'))
+              lines += ['Valid rows: ' + str(report['valid_rows']),
+                        'Invalid rows: ' + str(len(report['invalid_row_lines'])),
+                        '']
+              gaps = sum(len(p['gaps_over_330_seconds']) for p in report['pairs'])
+              duplicates = sum(p['duplicate_received_extra_rows'] for p in report['pairs'])
+              lines += ['Intervals over 330 seconds: ' + str(gaps),
+                        'Extra duplicate receive timestamps: ' + str(duplicates), '']
+          else:
+              lines += ['No analysis report was produced. Inspect failed steps and logs.', '']
+          if mode == 'live-smoke-test':
+              lines += ['One observation only: this tests connectivity, NOT continuity or strategy performance.', '']
+          lines += ['No orders, wallets, account keys, repository data writes, or Botkeep changes.',
+                    'Reports are available in the data-quality-report artifact when generated.',
+                    'Treat workflow inputs, logs and artifacts in this public repository as non-private.']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as output:
+              output.write('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload generated reports and test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: data-quality-report
-          path: reports/analysis.json
+          name: data-quality-report-${{ github.run_id }}
+          path: reports/
           if-no-files-found: warn
           retention-days: 7
