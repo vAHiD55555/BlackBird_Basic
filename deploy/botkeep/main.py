@@ -83,7 +83,8 @@ def retry_after_seconds(headers):
 def collect_cycle(path, active, log, once=False):
     """Append successes immediately; mutate active only for unavailable products."""
     failed, cooldown = False, 0.0
-    for index, pair in enumerate(tuple(active)):
+    cycle_pairs = tuple(active)
+    for index, pair in enumerate(cycle_pairs):
         try:
             price, stamp = fetch_price(pair)
             save_price(path, pair, price, stamp)
@@ -102,8 +103,8 @@ def collect_cycle(path, active, log, once=False):
                 log.warning("Global rate-limit backoff: at least %.1f seconds", cooldown)
                 if not once:
                     break
-                # In one-shot mode, still visit remaining symbols without a burst.
-                if index < len(active) - 1:
+                # Snapshot length remains correct after an earlier HTTP 404.
+                if index < len(cycle_pairs) - 1:
                     time.sleep(cooldown)
                 cooldown = 0.0
         except (ValueError, OSError, KeyError, TypeError, csv.Error) as error:
