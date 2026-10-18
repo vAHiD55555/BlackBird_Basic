@@ -1,0 +1,35 @@
+name: Package Botkeep
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check Python syntax (no price requests)
+        run: python -m py_compile deploy/botkeep/main.py
+      - name: Package standalone upload files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          source = Path('deploy/botkeep')
+          with ZipFile('botkeep-upload.zip', 'w', compression=ZIP_DEFLATED) as archive:
+              for name in ('main.py', 'requirements.txt', 'README_FA.md'):
+                  archive.write(source / name, arcname=name)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: botkeep-upload
+          path: botkeep-upload.zip
+          if-no-files-found: error
+          retention-days: 7
