@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import math
 import statistics
 from collections import Counter
 from datetime import datetime, timezone
@@ -18,7 +19,13 @@ def parse_time(value):
     return stamp.astimezone(timezone.utc)
 
 
-def analyze(path):
+def analyze(path, expected_interval=60):
+    expected_interval = float(expected_interval)
+    if not math.isfinite(expected_interval) or expected_interval <= 0:
+        raise ValueError("Expected interval must be positive and finite")
+    threshold = expected_interval * 1.1
+    if not math.isfinite(threshold):
+        raise ValueError("Expected interval is too large")
     records, invalid = [], []
     with Path(path).open(newline="", encoding="utf-8-sig") as source:
         reader = csv.DictReader(source)
@@ -37,7 +44,7 @@ def analyze(path):
                 records.append((received, source_time, pair, price))
             except (ValueError, TypeError, AttributeError, KeyError, InvalidOperation):
                 invalid.append(line)
-    result = {"valid_rows": len(records), "invalid_row_lines": invalid, "pairs": []}
+    result = {"valid_rows": len(records), "invalid_row_lines": invalid, "expected_interval_seconds": expected_interval, "gap_threshold_seconds": threshold, "pairs": []}
     for pair in sorted({row[2] for row in records}):
         original = [row for row in records if row[2] == pair]
         rows = sorted(original, key=lambda row: row[0])
@@ -57,9 +64,9 @@ def analyze(path):
             "backwards_steps_in_file": sum(original[i][0] < original[i-1][0] for i in range(1, len(original))),
             "median_interval_seconds": statistics.median(gaps) if gaps else None,
             "max_interval_seconds": max(gaps) if gaps else None,
-            "gaps_over_330_seconds": [
+            "gaps_over_threshold_seconds": [
                 {"from": rows[i-1][0].isoformat(), "to": rows[i][0].isoformat(), "seconds": gaps[i-1]}
-                for i in range(1, len(rows)) if gaps[i-1] > 330
+                for i in range(1, len(rows)) if gaps[i-1] > threshold
             ],
             "negative_source_lag_count": sum(lag < 0 for lag in lags),
             "median_source_lag_seconds": statistics.median(lags),
@@ -74,8 +81,9 @@ def analyze(path):
         "Sampled prices are not candles or guaranteed execution prices.",
         "Price change is not strategy profit. No trades or fees simulated.",
         "Source lag includes clock effects and is not pure network latency.",
-        "Gap threshold is 330 seconds for a nominal 300-second collector.",
-        "This report describes only the supplied file, not service uptime.",
+        "Gap threshold is 1.1 times the supplied expected interval, per pair.",
+        "Only pairs present in the file are reported; absent assets are not inferred.",
+        "This report describes only the supplied file, not service uptime or market stress.",
     ]
     return result
 
@@ -84,11 +92,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("file", nargs="?", default="prices.csv")
     parser.add_argument("--output", help="Optional JSON report path")
+    parser.add_argument("--expected-interval", type=float, default=60, help="Nominal seconds per pair (default 60; legacy 300)")
     args = parser.parse_args()
     if args.output and Path(args.file).resolve() == Path(args.output).resolve():
         parser.error("Output must not overwrite input")
     try:
-        report = analyze(args.file)
+        report = analyze(args.file, expected_interval=args.expected_interval)
         text = json.dumps(report, indent=2, ensure_ascii=False)
         if args.output:
             destination = Path(args.output)
