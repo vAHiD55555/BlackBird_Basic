@@ -5,10 +5,19 @@ on:
   workflow_dispatch:
     inputs:
       csv_text:
-        description: 'Optional public CSV with header. Leave empty for ONE live BTC-USD sample (connection test only).'
+        description: 'Optional public CSV with header. Empty: one six-asset live cycle (connection test only).'
         required: false
         default: ''
         type: string
+      expected_interval:
+        description: 'Nominal seconds per pair; choose 300 for legacy files'
+        required: true
+        default: '60'
+        type: choice
+        options:
+          - '60'
+          - '30'
+          - '300'
 
 permissions:
   contents: read
@@ -17,26 +26,24 @@ jobs:
   analyze:
     name: Test and analyze (read-only)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    env:
+      EXPECTED_INTERVAL: ${{ inputs.expected_interval }}
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-
       - name: Prepare report directory
         run: mkdir -p reports data
-
       - name: Run offline tests
         run: |
           set -o pipefail
           python -m unittest discover -s tests -v 2>&1 | tee reports/tests.txt
-
       - name: Prepare user CSV or choose connection test
         id: input
         env:
@@ -45,30 +52,31 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
+          interval = os.environ.get('EXPECTED_INTERVAL', '')
+          if interval not in ('60', '30', '300'):
+              raise SystemExit('Invalid expected interval')
           text = os.environ.get('CSV_TEXT', '')
           mode = 'csv' if text.strip() else 'live-smoke-test'
           if mode == 'csv':
-              # Accept real newlines or literal backslash-n for mobile forms.
               text = text.replace('\\r\\n', '\n').replace('\\n', '\n')
               text = text.replace('\r\n', '\n').strip() + '\n'
               Path('data/input.csv').write_text(text, encoding='utf-8')
           Path('reports/mode.txt').write_text(mode + '\n', encoding='utf-8')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('mode=' + mode + '\n')
-          print('Selected mode:', mode)
+          print('Selected mode:', mode, '| Expected interval:', interval)
           PY
-
-      - name: Get ONE live observation using project collector
+      - name: Visit six assets once using project collector
+        id: live
         if: steps.input.outputs.mode == 'live-smoke-test'
         run: |
           set -o pipefail
           python main.py --once --output data/input.csv 2>&1 | tee reports/connection.txt
-
-      - name: Analyze CSV offline
+      - name: Analyze CSV offline including partial successes
+        if: ${{ always() && steps.input.outcome == 'success' && (steps.input.outputs.mode == 'csv' || steps.live.outcome == 'success' || steps.live.outcome == 'failure') }}
         run: |
           set -o pipefail
-          python tools/analyze_prices.py data/input.csv --output reports/analysis.json 2>&1 | tee reports/analysis.txt
-
+          python tools/analyze_prices.py data/input.csv --expected-interval "$EXPECTED_INTERVAL" --output reports/analysis.json 2>&1 | tee reports/analysis.txt
       - name: Write run summary
         if: always()
         run: |
@@ -82,24 +90,27 @@ jobs:
           path = Path('reports/analysis.json')
           if path.exists():
               report = json.loads(path.read_text(encoding='utf-8'))
+              gaps = sum(len(p['gaps_over_threshold_seconds']) for p in report['pairs'])
+              duplicates = sum(p['duplicate_received_extra_rows'] for p in report['pairs'])
               lines += ['Valid rows: ' + str(report['valid_rows']),
                         'Invalid rows: ' + str(len(report['invalid_row_lines'])),
-                        '']
-              gaps = sum(len(p['gaps_over_330_seconds']) for p in report['pairs'])
-              duplicates = sum(p['duplicate_received_extra_rows'] for p in report['pairs'])
-              lines += ['Intervals over 330 seconds: ' + str(gaps),
+                        'Expected interval seconds: ' + str(report['expected_interval_seconds']),
+                        'Gap threshold seconds: ' + str(report['gap_threshold_seconds']),
+                        'Intervals over threshold: ' + str(gaps),
                         'Extra duplicate receive timestamps: ' + str(duplicates), '']
+              for pair in report['pairs']:
+                  lines += [pair['pair'] + ': ' + str(pair['rows']) + ' rows']
           else:
               lines += ['No analysis report was produced. Inspect failed steps and logs.', '']
           if mode == 'live-smoke-test':
-              lines += ['One observation only: this tests connectivity, NOT continuity or strategy performance.', '']
-          lines += ['No orders, wallets, account keys, repository data writes, or Botkeep changes.',
-                    'Reports are available in the data-quality-report artifact when generated.',
+              lines += ['One visit per configured asset; partial results possible. Access denial stops early.',
+                        'Connection check only: NOT continuity, market stress, volatility prediction or strategy performance.', '']
+          lines += ['A report may contain partial successes even when the live step failed.',
+                    'No orders, wallets, account keys, repository data writes, or Botkeep changes.',
                     'Treat workflow inputs, logs and artifacts in this public repository as non-private.']
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as output:
               output.write('\n'.join(lines) + '\n')
           PY
-
       - name: Upload generated reports and test logs
         if: always()
         uses: actions/upload-artifact@v4
